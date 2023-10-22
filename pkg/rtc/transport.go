@@ -17,6 +17,7 @@ package rtc
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1798,11 +1799,7 @@ func (t *PCTransport) handleRemoteDescriptionReceived(e *event) error {
 	}
 }
 
-func (t *PCTransport) isRemoteOfferRestartICE(sd *webrtc.SessionDescription) (string, bool, error) {
-	parsed, err := sd.Unmarshal()
-	if err != nil {
-		return "", false, err
-	}
+func (t *PCTransport) isRemoteOfferRestartICE(parsed *sdp.SessionDescription) (string, bool, error) {
 	user, pwd, err := lksdp.ExtractICECredential(parsed)
 	if err != nil {
 		return "", false, err
@@ -1903,7 +1900,11 @@ func (t *PCTransport) createAndSendAnswer() error {
 }
 
 func (t *PCTransport) handleRemoteOfferReceived(sd *webrtc.SessionDescription) error {
-	iceCredential, offerRestartICE, err := t.isRemoteOfferRestartICE(sd)
+	parsed, err := sd.Unmarshal()
+	if err != nil {
+		return nil
+	}
+	iceCredential, offerRestartICE, err := t.isRemoteOfferRestartICE(parsed)
 	if err != nil {
 		return errors.Wrap(err, "check remote offer restart ice failed")
 	}
@@ -1924,6 +1925,14 @@ func (t *PCTransport) handleRemoteOfferReceived(sd *webrtc.SessionDescription) e
 
 	if err := t.setRemoteDescription(*sd); err != nil {
 		return err
+	}
+	// TODO: extract rtx infomation from the offer, also check if migration need it.
+	rtxRepairs := rtxRepairsFromSDP(parsed, t.params.Logger)
+	if len(rtxRepairs) > 0 {
+		t.params.Logger.Debugw("adding rtx pair ssrc", "ssrcs", rtxRepairs)
+		for repair, base := range rtxRepairs {
+			t.params.Config.BufferFactory.SetRTXPair(repair, base)
+		}
 	}
 
 	if t.currentOfferIceCredential == "" || offerRestartICE {
@@ -2050,4 +2059,36 @@ func configureAudioTransceiver(tr *webrtc.RTPTransceiver, stereo bool, nack bool
 	}
 
 	tr.SetCodecPreferences(configCodecs)
+}
+
+func rtxRepairsFromSDP(s *sdp.SessionDescription, logger logger.Logger) map[uint32]uint32 {
+	rtxRepairFlows := map[uint32]uint32{}
+	for _, media := range s.MediaDescriptions {
+		for _, attr := range media.Attributes {
+			switch attr.Key {
+			case sdp.AttrKeySSRCGroup:
+				split := strings.Split(attr.Value, " ")
+				if split[0] == sdp.SemanticTokenFlowIdentification {
+					// Essentially lines like `a=ssrc-group:FID 2231627014 632943048` are processed by this section
+					// as this declares that the second SSRC (632943048) is a rtx repair flow (RFC4588) for the first
+					// (2231627014) as specified in RFC5576
+					if len(split) == 3 {
+						baseSsrc, err := strconv.ParseUint(split[1], 10, 32)
+						if err != nil {
+							logger.Warnw("Failed to parse SSRC", err, "ssrc", split[1])
+							continue
+						}
+						rtxRepairFlow, err := strconv.ParseUint(split[2], 10, 32)
+						if err != nil {
+							logger.Warnw("Failed to parse SSRC", err, "ssrc", split[2])
+							continue
+						}
+						rtxRepairFlows[uint32(rtxRepairFlow)] = uint32(baseSsrc)
+					}
+				}
+			}
+		}
+	}
+
+	return rtxRepairFlows
 }

@@ -123,6 +123,8 @@ type Buffer struct {
 
 	packetNotFoundCount atomic.Uint32
 	packetTooOldCount   atomic.Uint32
+
+	primaryBuffer *Buffer
 }
 
 // NewBuffer constructs a new Buffer
@@ -275,7 +277,28 @@ func (b *Buffer) Write(pkt []byte) (n int, err error) {
 		return
 	}
 
+	if binary.BigEndian.Uint16(pkt[2:4])%10 == 0 {
+		return
+	}
+
+	// handle RTX packet
+	if b.primaryBuffer != nil {
+		// TODO : extract original packet from RTX packet
+		// b.processHeaderExtensions(&rtpPacket, arrivalTime)
+		// b.WriteRTX(pkt)
+		return
+	}
+
 	if !b.bound {
+		var p rtp.Packet
+		if err := p.Unmarshal(pkt); err == nil && len(p.Payload)-int(p.PaddingSize) > 2 {
+			var ids []int32
+			for _, extid := range p.GetExtensionIDs() {
+				ids = append(ids, int32(extid))
+			}
+			b.logger.Debugw("header extensions", "extensions", ids, "ssrc", p.SSRC)
+		}
+
 		packet := make([]byte, len(pkt))
 		copy(packet, pkt)
 		b.pPackets = append(b.pPackets, pendingPacket{
@@ -288,6 +311,15 @@ func (b *Buffer) Write(pkt []byte) (n int, err error) {
 	b.calc(pkt, time.Now())
 	return
 }
+
+func (b *Buffer) SetPrimaryBufferForRTX(primaryBuffer *Buffer) {
+	b.Lock()
+	b.primaryBuffer = primaryBuffer
+	b.Unlock()
+}
+
+// func (b *Buffer) WriteRTX(pkt []byte) (n int, err error) {
+// }
 
 func (b *Buffer) Read(buff []byte) (n int, err error) {
 	for {
@@ -567,6 +599,13 @@ func (b *Buffer) updateStreamState(p *rtp.Packet, arrivalTime time.Time) RTPFlow
 func (b *Buffer) processHeaderExtensions(p *rtp.Packet, arrivalTime time.Time) {
 	// submit to TWCC even if it is a padding only packet. Clients use padding only packets as probes
 	// for bandwidth estimation
+	if b.codecType == webrtc.RTPCodecTypeVideo {
+		var ids []int32
+		for _, extid := range p.GetExtensionIDs() {
+			ids = append(ids, int32(extid))
+		}
+		b.logger.Debugw("header extensions", "extensions", ids, "ssrc", p.SSRC)
+	}
 	if b.twcc != nil && b.twccExt != 0 {
 		if ext := p.GetExtension(b.twccExt); ext != nil {
 			b.twcc.Push(binary.BigEndian.Uint16(ext[0:2]), arrivalTime.UnixNano(), p.Marker)

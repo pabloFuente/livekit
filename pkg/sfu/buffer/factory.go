@@ -60,6 +60,8 @@ type Factory struct {
 	audioPool   *sync.Pool
 	rtpBuffers  map[uint32]*Buffer
 	rtcpReaders map[uint32]*RTCPReader
+
+	rtxPair map[uint32]uint32 // repair -> base
 }
 
 func (f *Factory) GetOrNew(packetType packetio.BufferPacketType, ssrc uint32) io.ReadWriteCloser {
@@ -87,6 +89,7 @@ func (f *Factory) GetOrNew(packetType packetio.BufferPacketType, ssrc uint32) io
 		buffer.OnClose(func() {
 			f.Lock()
 			delete(f.rtpBuffers, ssrc)
+			delete(f.rtxPair, ssrc)
 			f.Unlock()
 		})
 		return buffer
@@ -110,4 +113,15 @@ func (f *Factory) GetRTCPReader(ssrc uint32) *RTCPReader {
 	f.RLock()
 	defer f.RUnlock()
 	return f.rtcpReaders[ssrc]
+}
+
+func (f *Factory) SetRTXPair(repair, base uint32) {
+	f.Lock()
+	f.rtxPair[repair] = base
+
+	repairBuffer, baseBuffer := f.rtpBuffers[repair], f.rtpBuffers[base]
+	f.Unlock()
+	if repairBuffer != nil && baseBuffer != nil {
+		repairBuffer.SetPrimaryBufferForRTX(baseBuffer)
+	}
 }

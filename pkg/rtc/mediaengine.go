@@ -56,6 +56,10 @@ func registerCodecs(me *webrtc.MediaEngine, codecs []*livekit.Codec, rtcpFeedbac
 			PayloadType:        96,
 		},
 		{
+			RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: "video/rtx", ClockRate: 90000, SDPFmtpLine: "apt=96"},
+			PayloadType:        97,
+		},
+		{
 			RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, SDPFmtpLine: "profile-id=0", RTCPFeedback: rtcpFeedback.Video},
 			PayloadType:        98,
 		},
@@ -83,11 +87,11 @@ func registerCodecs(me *webrtc.MediaEngine, codecs []*livekit.Codec, rtcpFeedbac
 		if filterOutH264HighProfile && codec.RTPCodecCapability.SDPFmtpLine == h264HighProfileFmtp {
 			continue
 		}
-		if IsCodecEnabled(codecs, codec.RTPCodecCapability) {
-			if err := me.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
-				return err
-			}
+		// if IsCodecEnabled(codecs, codec.RTPCodecCapability) {
+		if err := me.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
 		}
+		// }
 	}
 	return nil
 }

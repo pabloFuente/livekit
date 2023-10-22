@@ -105,3 +105,5 @@ require (
 	google.golang.org/grpc v1.59.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+replace github.com/pion/webrtc/v3 => ../webrtc

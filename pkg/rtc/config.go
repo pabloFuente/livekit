@@ -87,6 +87,7 @@ func NewWebRTCConfig(conf *config.Config) (*WebRTCConfig, error) {
 				sdp.TransportCCURI,
 				frameMarking,
 				dd.ExtensionURI,
+				"urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id",
 			},
 		},
 		RTCPFeedback: RTCPFeedbackConfig{
