@@ -1523,6 +1523,7 @@ func (d *DownTrack) handleRTCP(bytes []byte) {
 					continue
 				}
 				rr.Reports = append(rr.Reports, r)
+				d.forwarder.logger.Debugw("rr jitter", "jitter", uint64(r.Jitter*1e6)/uint64(d.codec.ClockRate))
 
 				rtt, isRttChanged := d.rtpStats.UpdateFromReceiverReport(r)
 				if isRttChanged {
