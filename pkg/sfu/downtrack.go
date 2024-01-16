@@ -262,8 +262,7 @@ type DownTrack struct {
 	bytesSent                       atomic.Uint32
 	bytesRetransmitted              atomic.Uint32
 
-	playoutDelayBytes atomic.Value //bytes of marshalled playout delay
-	playoudDelayAcked atomic.Bool
+	playoutDelay *PlayoutDelayController
 
 	pacer pacer.Pacer
 
@@ -295,6 +294,16 @@ func NewDownTrack(params DowntrackParams) (*DownTrack, error) {
 		kind = webrtc.RTPCodecType(0)
 	}
 
+	var playoutDelay *PlayoutDelayController
+	// set initial playout delay to minimum value
+	if delay := params.PlayoutDelayLimit; delay.GetEnabled() {
+		var err error
+		playoutDelay, err = NewPlayoutDelayController(delay.GetMin(), delay.GetMax(), params.Logger)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	d := &DownTrack{
 		params:              params,
 		id:                  params.Receiver.TrackID(),
@@ -304,6 +313,7 @@ func NewDownTrack(params DowntrackParams) (*DownTrack, error) {
 		pacer:               params.Pacer,
 		maxLayerNotifierCh:  make(chan struct{}, 1),
 		keyFrameRequesterCh: make(chan struct{}, 1),
+		playoutDelay:        playoutDelay,
 	}
 	d.forwarder = NewForwarder(
 		d.kind,
@@ -330,23 +340,6 @@ func NewDownTrack(params DowntrackParams) (*DownTrack, error) {
 		}
 	})
 
-	// set initial playout delay to minimum value
-	if d.params.PlayoutDelayLimit.GetEnabled() {
-		maxDelay := uint32(rtpextension.PlayoutDelayDefaultMax)
-		if d.params.PlayoutDelayLimit.GetMax() > 0 {
-			maxDelay = d.params.PlayoutDelayLimit.GetMax()
-		}
-		delay := rtpextension.PlayoutDelayFromValue(
-			uint16(d.params.PlayoutDelayLimit.GetMin()),
-			uint16(maxDelay),
-		)
-		b, err := delay.Marshal()
-		if err == nil {
-			d.playoutDelayBytes.Store(b)
-		} else {
-			d.params.Logger.Errorw("failed to marshal playout delay", err, "playoutDelay", d.params.PlayoutDelayLimit)
-		}
-	}
 	if d.kind == webrtc.RTPCodecTypeVideo {
 		go d.maxLayerNotifierWorker()
 		go d.keyFrameRequester()
@@ -715,9 +708,9 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) error {
 	if tp.ddBytes != nil {
 		extensions = []pacer.ExtensionData{{ID: uint8(d.dependencyDescriptorExtID), Payload: tp.ddBytes}}
 	}
-	if d.playoutDelayExtID != 0 && !d.playoudDelayAcked.Load() {
-		if val := d.playoutDelayBytes.Load(); val != nil {
-			extensions = append(extensions, pacer.ExtensionData{ID: uint8(d.playoutDelayExtID), Payload: val.([]byte)})
+	if d.playoutDelayExtID != 0 && d.playoutDelay != nil {
+		if val := d.playoutDelay.GetDelayExtension(hdr.SequenceNumber); val != nil {
+			extensions = append(extensions, pacer.ExtensionData{ID: uint8(d.playoutDelayExtID), Payload: val})
 		}
 	}
 	if d.sequencer != nil {
@@ -1534,7 +1527,10 @@ func (d *DownTrack) handleRTCP(bytes []byte) {
 					sal.OnRTCPReceiverReport(d, r)
 				}
 
-				d.playoudDelayAcked.Store(true)
+				if d.playoutDelay != nil {
+					d.playoutDelay.OnSeqAcked(uint16(r.LastSequenceNumber))
+					d.playoutDelay.SetJitter(r.Jitter)
+				}
 			}
 			if len(rr.Reports) > 0 {
 				d.listenerLock.RLock()
