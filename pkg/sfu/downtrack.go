@@ -1516,7 +1516,6 @@ func (d *DownTrack) handleRTCP(bytes []byte) {
 					continue
 				}
 				rr.Reports = append(rr.Reports, r)
-				d.forwarder.logger.Debugw("rr jitter", "jitter", uint64(r.Jitter*1e6)/uint64(d.codec.ClockRate))
 
 				rtt, isRttChanged := d.rtpStats.UpdateFromReceiverReport(r)
 				if isRttChanged {
@@ -1527,9 +1526,11 @@ func (d *DownTrack) handleRTCP(bytes []byte) {
 					sal.OnRTCPReceiverReport(d, r)
 				}
 
+				jitterMs := uint64(r.Jitter*1e3) / uint64(d.codec.ClockRate)
+				d.forwarder.logger.Debugw("rr jitter", "jitter", jitterMs)
 				if d.playoutDelay != nil {
 					d.playoutDelay.OnSeqAcked(uint16(r.LastSequenceNumber))
-					d.playoutDelay.SetJitter(r.Jitter)
+					d.playoutDelay.SetJitter(uint32(jitterMs))
 				}
 			}
 			if len(rr.Reports) > 0 {
