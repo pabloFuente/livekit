@@ -27,9 +27,9 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/pion/dtls/v2 v2.2.7
 	github.com/pion/ice/v2 v2.3.11
-	github.com/pion/interceptor v0.1.24
-	github.com/pion/rtcp v1.2.10
-	github.com/pion/rtp v1.8.2
+	github.com/pion/interceptor v0.1.25
+	github.com/pion/rtcp v1.2.12
+	github.com/pion/rtp v1.8.3
 	github.com/pion/sctp v1.8.9
 	github.com/pion/sdp/v3 v3.0.6
 	github.com/pion/transport/v2 v2.2.4
@@ -84,7 +84,7 @@ require (
 	github.com/pion/logging v0.2.2 // indirect
 	github.com/pion/mdns v0.0.8 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/srtp/v2 v2.0.17 // indirect
+	github.com/pion/srtp/v2 v2.0.18 // indirect
 	github.com/pion/stun v0.6.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.4.1-0.20230718164431-9a2bf3000d16 // indirect
