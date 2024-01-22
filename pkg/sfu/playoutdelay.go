@@ -12,6 +12,8 @@ const (
 	PlayoutDelayStateChanged int32 = iota
 	PlayoutDelaySending
 	PlayoutDelayAcked
+
+	jitterMultiToDelay = 15
 )
 
 type PlayoutDelayController struct {
@@ -39,7 +41,7 @@ func NewPlayoutDelayController(minDelay, maxDelay uint32, logger logger.Logger) 
 
 func (c *PlayoutDelayController) SetJitter(jitter uint32) {
 	c.lock.Lock()
-	targetDelay := jitter * 10
+	targetDelay := jitter * jitterMultiToDelay
 	// increase delay quickly, decrease slowly to make fps more stable
 	if targetDelay > c.currentDelay {
 		targetDelay = (targetDelay-c.currentDelay)*3/4 + c.currentDelay
