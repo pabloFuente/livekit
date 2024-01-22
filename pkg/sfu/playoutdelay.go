@@ -13,7 +13,7 @@ const (
 	PlayoutDelaySending
 	PlayoutDelayAcked
 
-	jitterMultiToDelay = 20
+	jitterMultiToDelay = 25
 )
 
 type PlayoutDelayController struct {
