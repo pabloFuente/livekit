@@ -1044,10 +1044,11 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) int32 {
 		return 0
 	}
 
+	codecBytes := tp.codecHeader()
 	poolEntity := PacketFactory.Get().(*[]byte)
 	payload := *poolEntity
-	copy(payload, tp.codecBytes)
-	n := copy(payload[len(tp.codecBytes):], extPkt.Packet.Payload[tp.incomingHeaderSize:])
+	copy(payload, codecBytes)
+	n := copy(payload[len(codecBytes):], extPkt.Packet.Payload[tp.incomingHeaderSize:])
 	if n != len(extPkt.Packet.Payload[tp.incomingHeaderSize:]) {
 		d.params.Logger.Errorw(
 			"payload overflow", errPayloadOverflow,
@@ -1057,7 +1058,7 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) int32 {
 		PacketFactory.Put(poolEntity)
 		return 0
 	}
-	payload = payload[:len(tp.codecBytes)+n]
+	payload = payload[:len(codecBytes)+n]
 
 	trailerStripped := 0
 	if d.params.StripPacketTrailer {
@@ -1068,7 +1069,7 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) int32 {
 
 	// translate RTP header
 	hdr := RTPHeaderFactory.Get().(*rtp.Header)
-	*hdr = rtp.Header{
+	initPooledRTPHeader(hdr, rtp.Header{
 		Version:        extPkt.Packet.Version,
 		Padding:        false,
 		Marker:         tp.marker,
@@ -1076,7 +1077,7 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) int32 {
 		SequenceNumber: uint16(tp.rtp.extSequenceNumber),
 		Timestamp:      uint32(tp.rtp.extTimestamp),
 		SSRC:           d.ssrc,
-	}
+	})
 
 	// add extensions
 	if d.dependencyDescriptorExtID != 0 && tp.ddBytes != nil {
@@ -1097,24 +1098,30 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) int32 {
 	}
 	var actBytes []byte
 	if extPkt.AbsCaptureTimeExt != nil && d.absCaptureTimeExtID != 0 {
-		// normalize capture time to SFU clock.
-		// NOTE: even if there is estimated offset populated, just re-map the
-		// absolute capture time stamp as it should be the same RTCP sender report
-		// clock domain of publisher. SFU is normalising sender reports of publisher
-		// to SFU clock before sending to subscribers. So, capture time should be
-		// normalized to the same clock. Clear out any offset.
-		_, _, _, refSenderReport := d.forwarder.GetSenderReportParams()
-		if refSenderReport != nil {
-			actExtCopy := *extPkt.AbsCaptureTimeExt
-			if err = actExtCopy.Rewrite(
-				rtpstats.RTCPSenderReportPropagationDelay(
-					refSenderReport,
-					!d.params.DisableSenderReportPassThrough,
-				),
-			); err == nil {
-				actBytes, err = actExtCopy.Marshal()
-				if err == nil {
-					hdr.SetExtension(uint8(d.absCaptureTimeExtID), actBytes)
+		if !d.params.DisableSenderReportPassThrough {
+			// pass through the original publisher capture time verbatim, consistent
+			// with sender reports also being passed through unchanged.
+			actBytes, err = extPkt.AbsCaptureTimeExt.Marshal()
+			if err == nil {
+				hdr.SetExtension(uint8(d.absCaptureTimeExtID), actBytes)
+			}
+		} else {
+			// normalize capture time to SFU clock.
+			// NOTE: even if there is estimated offset populated, just re-map the
+			// absolute capture time stamp as it should be the same RTCP sender report
+			// clock domain of publisher. SFU is normalising sender reports of publisher
+			// to SFU clock before sending to subscribers. So, capture time should be
+			// normalized to the same clock. Clear out any offset.
+			_, _, _, refSenderReport := d.forwarder.GetSenderReportParams()
+			if refSenderReport != nil {
+				actExtCopy := *extPkt.AbsCaptureTimeExt
+				if err = actExtCopy.Rewrite(
+					rtpstats.RTCPSenderReportPropagationDelay(refSenderReport),
+				); err == nil {
+					actBytes, err = actExtCopy.Marshal()
+					if err == nil {
+						hdr.SetExtension(uint8(d.absCaptureTimeExtID), actBytes)
+					}
 				}
 			}
 		}
@@ -1129,7 +1136,7 @@ func (d *DownTrack) WriteRTP(extPkt *buffer.ExtPacket, layer int32) int32 {
 			tp.rtp.extTimestamp,
 			hdr.Marker,
 			int8(layer),
-			payload[:len(tp.codecBytes)],
+			payload[:len(codecBytes)],
 			tp.incomingHeaderSize,
 			tp.ddBytes,
 			actBytes,
@@ -1280,7 +1287,7 @@ func (d *DownTrack) WritePaddingRTP(bytesToSend int, paddingOnMute bool, forceMa
 	payloads := make([]byte, RTPPaddingMaxPayloadSize*len(snts))
 	for i := range snts {
 		hdr := RTPHeaderFactory.Get().(*rtp.Header)
-		*hdr = rtp.Header{
+		initPooledRTPHeader(hdr, rtp.Header{
 			Version:        2,
 			Padding:        true,
 			PaddingSize:    byte(RTPPaddingMaxPayloadSize),
@@ -1289,7 +1296,7 @@ func (d *DownTrack) WritePaddingRTP(bytesToSend int, paddingOnMute bool, forceMa
 			SequenceNumber: uint16(snts[i].extSequenceNumber),
 			Timestamp:      uint32(snts[i].extTimestamp),
 			SSRC:           d.ssrc,
-		}
+		})
 		d.addDummyExtensions(hdr)
 
 		payload := payloads[i*RTPPaddingMaxPayloadSize : (i+1)*RTPPaddingMaxPayloadSize : (i+1)*RTPPaddingMaxPayloadSize]
@@ -1433,15 +1440,24 @@ func (d *DownTrack) CloseWithFlush(flush bool, isEnding bool) {
 		if flush {
 			doneFlushing := d.writeBlankFrameRTP(RTPBlankFramesCloseSeconds, d.blankFramesGeneration.Inc())
 
+			// The flush runs in its own goroutine (writeBlankFrameRTP) and is
+			// cancelled via blankFramesGeneration, so bindLock guards nothing
+			// during the wait. Release it: bindLock is a control-plane lock
+			// (Bind/SetConnected/ReceiverRestart), and holding it across the
+			// up-to-flushTimeout wait serializes all of those behind every
+			// close. isClosed is already set, so no other close can enter.
+			d.bindLock.Unlock()
+
 			// wait a limited time to flush
 			timer := time.NewTimer(flushTimeout)
-			defer timer.Stop()
-
 			select {
 			case <-doneFlushing:
 			case <-timer.C:
 				d.blankFramesGeneration.Inc() // in case flush is still running
 			}
+			timer.Stop()
+
+			d.bindLock.Lock()
 		}
 
 		d.params.Logger.Debugw("closing sender", "kind", d.kind)
@@ -1748,6 +1764,10 @@ func (d *DownTrack) ReceiverRestart(rcvr TrackReceiver) {
 	}
 
 	d.bindLock.Lock()
+	if d.isClosed.Load() {
+		d.bindLock.Unlock()
+		return
+	}
 	codec := d.codec.Load().(webrtc.RTPCodecCapability)
 	d.bindLock.Unlock()
 
@@ -2160,6 +2180,10 @@ func (d *DownTrack) handleRTCPRTX(bytes []byte) {
 
 func (d *DownTrack) SetConnected() {
 	d.bindLock.Lock()
+	if d.isClosed.Load() {
+		d.bindLock.Unlock()
+		return
+	}
 	if !d.connected.Swap(true) {
 		d.onBindAndConnectedChange()
 	}
@@ -2193,7 +2217,7 @@ func (d *DownTrack) retransmitPacket(epm *extPacketMeta, sourcePkt []byte, isPro
 		return 0, errPayloadOverflow
 	}
 	hdr := RTPHeaderFactory.Get().(*rtp.Header)
-	*hdr = rtp.Header{
+	initPooledRTPHeader(hdr, rtp.Header{
 		Version:        pkt.Header.Version,
 		Padding:        false,
 		Marker:         epm.marker,
@@ -2201,7 +2225,7 @@ func (d *DownTrack) retransmitPacket(epm *extPacketMeta, sourcePkt []byte, isPro
 		SequenceNumber: epm.targetSeqNo,
 		Timestamp:      epm.timestamp,
 		SSRC:           d.ssrc,
-	}
+	})
 	rtxOffset := 0
 	var rtxExtSequenceNumber uint64
 	if rtxPT := d.payloadTypeRTX.Load(); rtxPT != 0 && d.ssrcRTX != 0 {
@@ -2433,7 +2457,7 @@ func (d *DownTrack) WriteProbePackets(bytesToSend int, usePadding bool) int {
 		for i := range num {
 			rtxExtSequenceNumber := d.rtxSequenceNumber.Inc()
 			hdr := RTPHeaderFactory.Get().(*rtp.Header)
-			*hdr = rtp.Header{
+			initPooledRTPHeader(hdr, rtp.Header{
 				Version:        2,
 				Padding:        true,
 				PaddingSize:    byte(RTPPaddingMaxPayloadSize),
@@ -2442,7 +2466,7 @@ func (d *DownTrack) WriteProbePackets(bytesToSend int, usePadding bool) int {
 				SequenceNumber: uint16(rtxExtSequenceNumber),
 				Timestamp:      0,
 				SSRC:           d.ssrcRTX,
-			}
+			})
 			d.addDummyExtensions(hdr)
 
 			payload := payloads[i*RTPPaddingMaxPayloadSize : (i+1)*RTPPaddingMaxPayloadSize : (i+1)*RTPPaddingMaxPayloadSize]

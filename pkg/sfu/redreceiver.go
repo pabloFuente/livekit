@@ -51,6 +51,10 @@ type RedReceiver struct {
 	closed            atomic.Bool
 	pktBuff           [maxRedCount]*rtp.Packet
 	redPayloadBuf     [mtuSize]byte
+	// forwarded packet, reused like redPayloadBuf since ForwardRTP runs on one goroutine
+	// and down tracks do not keep the packet past WriteRTP
+	redExtPkt buffer.ExtPacket
+	redRtpPkt rtp.Packet
 }
 
 func NewRedReceiver(receiver TrackReceiver, dsp utils.DownTrackSpreaderParams) REDTransformer {
@@ -73,11 +77,7 @@ func (r *RedReceiver) ForwardRTP(pkt *buffer.ExtPacket, spatialLayer int32) int3
 
 	// fallback to primary codec if payload size exceeds redundant block length
 	if len(pkt.Packet.Payload) >= maxRedPayload {
-		var writeCount atomic.Int32
-		r.downTrackSpreader.Broadcast(func(dt TrackSender) {
-			writeCount.Add(dt.WriteRTP(pkt, spatialLayer))
-		})
-		return writeCount.Load()
+		return utils.BroadcastRTP(r.downTrackSpreader, pkt, spatialLayer)
 	}
 
 	redLen, err := r.encodeRedForPrimary(pkt.Packet, r.redPayloadBuf[:])
@@ -86,19 +86,17 @@ func (r *RedReceiver) ForwardRTP(pkt *buffer.ExtPacket, spatialLayer int32) int3
 		return 0
 	}
 
-	pPkt := *pkt
-	redRtpPacket := *pkt.Packet
+	redRtpPacket := &r.redRtpPkt
+	*redRtpPacket = *pkt.Packet
 	redRtpPacket.PayloadType = opusRedPT
 	redRtpPacket.Payload = r.redPayloadBuf[:redLen]
-	pPkt.Packet = &redRtpPacket
+	pPkt := &r.redExtPkt
+	*pPkt = *pkt
+	pPkt.Packet = redRtpPacket
 
 	// not modify the ExtPacket.RawPacket here for performance since it is not used by the DownTrack,
 	// otherwise it should be set to the correct value (marshal the primary rtp packet)
-	var writeCount atomic.Int32
-	r.downTrackSpreader.Broadcast(func(dt TrackSender) {
-		writeCount.Add(dt.WriteRTP(&pPkt, spatialLayer))
-	})
-	return writeCount.Load()
+	return utils.BroadcastRTP(r.downTrackSpreader, pPkt, spatialLayer)
 }
 
 func (r *RedReceiver) ForwardRTCPSenderReport(
@@ -120,7 +118,9 @@ func (r *RedReceiver) AddDownTrack(track TrackSender) error {
 		r.logger.Infow("subscriberID already exists, replacing downtrack", "subscriberID", track.SubscriberID())
 	}
 
-	r.downTrackSpreader.Store(track)
+	if !r.downTrackSpreader.TryStore(track) {
+		return ErrReceiverClosed
+	}
 	r.logger.Debugw("red receiver downtrack added", "subscriberID", track.SubscriberID())
 	return nil
 }
@@ -160,7 +160,7 @@ func (r *RedReceiver) IsClosed() bool {
 
 func (r *RedReceiver) Close() {
 	r.closed.Store(true)
-	closeTrackSenders(r.downTrackSpreader.ResetAndGetDownTracks())
+	closeTrackSenders(r.downTrackSpreader.CloseAndGetDownTracks())
 }
 
 func (r *RedReceiver) ReadRTP(buf []byte, layer uint8, esn uint64) (int, error) {

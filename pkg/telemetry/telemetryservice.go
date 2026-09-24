@@ -286,15 +286,48 @@ func (t *telemetryService) getOrCreateWorker(
 	t.workersMu.Lock()
 	defer t.workersMu.Unlock()
 
+	if roomID == "" {
+		logger.Warnw(
+			"telemetry stats worker keyed under an empty room id", nil,
+			"room", roomName,
+			"participant", participantIdentity,
+			"participantID", participantID,
+			"guard", guard,
+		)
+	}
+
 	roomWorkers := t.workers[roomID]
 	worker, ok := roomWorkers[participantID]
 	if ok && !worker.Closed(guard) {
 		return worker, true
 	}
 
+	// only ParticipantLeft releases a guard, so a released guard is a call landing after
+	// the participant left, e.g. ParticipantActive overtaken by the close. Do not create
+	// a worker nothing can ever release. The closed worker, if not yet reaped, is returned
+	// as found, otherwise nil is
+	if guard != nil && guard.released {
+		return worker, true
+	}
+
 	existingIsConnected := false
 	if ok {
 		existingIsConnected = worker.IsConnected()
+	}
+
+	// a guard references at most once, so a nil or already activated guard leaves the
+	// new worker with no references and its owner's release drives it negative
+	if guard == nil || guard.activated {
+		logger.Infow(
+			"telemetry stats worker created without a reference",
+			"room", roomName,
+			"roomID", roomID,
+			"participant", participantIdentity,
+			"participantID", participantID,
+			"guard", guard,
+			"replacedClosed", ok,
+			"existing", worker,
+		)
 	}
 
 	worker = newStatsWorker(
@@ -366,7 +399,17 @@ func (t *telemetryService) reKeyRoom(prevRoomID livekit.RoomID, roomID livekit.R
 				// only one worker can be keyed at (room, participant) and the one already
 				// filed there wins, close the superseded one so that it drains and is
 				// reaped instead of lingering in the flush list unreachable
-				if worker.ForceClose(survivor) {
+				forceClosed := worker.ForceClose(survivor)
+				logger.Infow(
+					"telemetry force closing superseded stats worker",
+					"prevRoomID", prevRoomID,
+					"roomID", roomID,
+					"participantID", participantID,
+					"forceClosed", forceClosed,
+					"superseded", worker,
+					"survivor", survivor,
+				)
+				if forceClosed {
 					prometheus.SubParticipant()
 				}
 				continue

@@ -205,6 +205,10 @@ func (s *StatsWorker) sealStatsLocked() statsBatch {
 }
 
 func (s *StatsWorker) SetConnected() {
+	if s == nil {
+		return
+	}
+
 	s.lock.Lock()
 	s.isConnected = true
 	s.lock.Unlock()
@@ -328,6 +332,10 @@ func (s *StatsWorker) collectStats(
 }
 
 func (s *StatsWorker) MarshalLogObject(e zapcore.ObjectEncoder) error {
+	if s == nil {
+		return nil
+	}
+
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 
